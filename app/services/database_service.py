@@ -1,9 +1,8 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
-from typing import List, Optional, Dict, Any
 import logging
-from datetime import datetime
-import json
+from typing import List, Optional, Dict, Any
+
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 from app.models.database import (
     SessionLocal, StoreAnalysis, Product, ContactDetail, SocialHandle,
@@ -12,7 +11,7 @@ from app.models.database import (
 from app.models.schemas import (
     BrandInsights, CompetitorAnalysis as CompetitorAnalysisSchema,
     ProductModel, ContactDetails, SocialHandles, PolicyInfo,
-    FAQ as FAQSchema, ImportantLinks, CompetitorInfo
+    FAQ as FAQSchema, ImportantLinks
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +58,7 @@ class DatabaseService:
             )
 
             db.add(db_analysis)
-            db.flush()  # Get the ID without committing
+            db.flush()
             analysis_id = db_analysis.id
 
             logger.info(f"Created main analysis record with ID: {analysis_id}")
@@ -139,7 +138,7 @@ class DatabaseService:
 
     def _save_social_handles(self, db: Session, analysis_id: int, social_handles: SocialHandles):
         """Save social handles to database"""
-        social_data = social_handles.dict()
+        social_data = social_handles.model_dump()
         saved_count = 0
 
         for platform, url in social_data.items():
@@ -156,7 +155,7 @@ class DatabaseService:
 
     def _save_policies(self, db: Session, analysis_id: int, policies: PolicyInfo):
         """Save policies to database"""
-        policy_data = policies.dict()
+        policy_data = policies.model_dump()
         saved_count = 0
 
         for policy_type, content in policy_data.items():
@@ -189,7 +188,7 @@ class DatabaseService:
 
     def _save_important_links(self, db: Session, analysis_id: int, important_links: ImportantLinks):
         """Save important links to database"""
-        links_data = important_links.dict()
+        links_data = important_links.model_dump()
         saved_count = 0
 
         for link_type, url in links_data.items():
