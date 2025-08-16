@@ -176,11 +176,14 @@ class DataExtractor:
         )
 
     def extract_faqs(self, soup: BeautifulSoup, base_url: str) -> List[FAQ]:
-        """Extract FAQ information"""
+        """Extract FAQ information from various sources"""
         faqs = []
+        logger.info("Starting FAQ extraction")
 
-        # Look for FAQ sections on current page
-        faq_sections = soup.find_all(['div', 'section'], class_=re.compile(r'faq|question|accordion', re.I))
+        # 1. Look for FAQ sections on current page
+        faq_sections = soup.find_all(['div', 'section'],
+                                     class_=re.compile(r'faq|question|accordion|customerservice|help', re.I))
+        logger.info(f"Found {len(faq_sections)} FAQ sections on current page")
 
         for section in faq_sections:
             questions = section.find_all(['h3', 'h4', 'h5', '.question', '[data-question]'], limit=10)
@@ -204,26 +207,249 @@ class DataExtractor:
 
                 if answer_elem and question_text:
                     answer_text = self._clean_html(answer_elem.get_text())
-                    if len(answer_text) > 10:  # Ensure it's a real answer
+                    if len(answer_text) > 10:
                         faqs.append(FAQ(
                             question=question_text,
-                            answer=answer_text[:500],  # Limit answer length
+                            answer=answer_text[:500],
                             category="General"
                         ))
 
-        # Look for dedicated FAQ page
-        important_links = self.scraper.extract_important_links(soup, base_url)
-        faq_patterns = ['faq', 'help', 'support', 'questions']
+        # 2. Look for FAQ links in footer, header, and navigation
+        faq_urls = self._find_faq_links(soup, base_url)
+        logger.info(f"Found {len(faq_urls)} FAQ page URLs")
 
-        for link_text, url in important_links.items():
-            if any(pattern in link_text.lower() for pattern in faq_patterns):
-                faq_soup = self.scraper.get_page_content(url)
-                if faq_soup:
-                    page_faqs = self.extract_faqs(faq_soup, base_url)
-                    faqs.extend(page_faqs[:5])  # Limit to 5 from FAQ page
+        # 3. Extract FAQs from dedicated pages
+        for faq_url in faq_urls[:3]:
+            logger.info(f"Extracting FAQs from: {faq_url}")
+            faq_soup = self.scraper.get_page_content(faq_url)
+            if faq_soup:
+                page_faqs = self._extract_faqs_from_page(faq_soup, base_url)
+                faqs.extend(page_faqs)
+                if len(faqs) >= 10:
+                    break
+
+        # 4. Remove duplicates and limit results
+        unique_faqs = self._remove_duplicate_faqs(faqs)
+        logger.info(f"Extracted {len(unique_faqs)} unique FAQs")
+
+        return unique_faqs[:10]
+
+    def _find_faq_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+        """Find FAQ page links from various sections of the page"""
+        faq_urls = []
+
+        # Enhanced FAQ detection patterns
+        faq_patterns = [
+            'faq', 'faqs', 'frequently asked questions', 'help', 'support',
+            'questions', 'customerservice', 'customer service', 'help center',
+            'support center', 'knowledge base', 'ask us', 'common questions'
+        ]
+
+        # Look in multiple sections
+        search_areas = [
+            soup,  # Entire page
+            soup.find('footer'),  # Footer specifically
+            soup.find('header'),  # Header
+            soup.find('nav'),  # Navigation
+            soup.find(id=re.compile(r'footer|navigation|menu', re.I)),  # ID-based sections
+            soup.find(class_=re.compile(r'footer|navigation|menu|nav', re.I))  # Class-based sections
+        ]
+
+        for area in search_areas:
+            if area is None:
+                continue
+
+            # Find all links in this area
+            links = area.find_all('a', href=True)
+
+            for link in links:
+                href = link.get('href', '')
+                text = link.get_text().lower().strip()
+
+                # Check if link matches FAQ patterns
+                if any(pattern in text for pattern in faq_patterns) or \
+                        any(pattern in href.lower() for pattern in faq_patterns):
+
+                    # Convert relative URLs to absolute
+                    if href.startswith('/'):
+                        full_url = urljoin(base_url, href)
+                    elif href.startswith('http'):
+                        full_url = href
+                    else:
+                        continue
+
+                    if full_url not in faq_urls:
+                        faq_urls.append(full_url)
+
+        return faq_urls
+
+    def _extract_faqs_from_page(self, soup: BeautifulSoup, base_url: str) -> List[FAQ]:
+        """Extract FAQs from a dedicated FAQ page"""
+        faqs = []
+
+        # Multiple strategies to find FAQ content
+        strategies = [
+            self._extract_accordion_faqs,
+            self._extract_structured_faqs,
+            self._extract_list_faqs,
+            self._extract_toggle_faqs
+        ]
+
+        for strategy in strategies:
+            strategy_faqs = strategy(soup)
+            faqs.extend(strategy_faqs)
+            if len(faqs) >= 5:  # Stop if we found enough from one strategy
                 break
 
-        return faqs[:10]  # Return max 10 FAQs
+        return faqs
+
+    def _extract_accordion_faqs(self, soup: BeautifulSoup) -> List[FAQ]:
+        """Extract FAQs from accordion-style sections"""
+        faqs = []
+
+        # Look for accordion containers
+        accordion_selectors = [
+            '[class*="accordion"]',
+            '[class*="collapse"]',
+            '[class*="toggle"]',
+            '[data-toggle]',
+            '.faq-item',
+            '.question-item'
+        ]
+
+        for selector in accordion_selectors:
+            accordion_items = soup.select(selector)
+
+            for item in accordion_items[:5]:  # Limit per selector
+                # Look for question in headers or buttons
+                question_elem = item.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'button', '.question'])
+                if question_elem:
+                    question_text = question_elem.get_text().strip()
+
+                    # Look for answer in associated content
+                    answer_elem = item.find(['.answer', '.content', '.collapse', '.accordion-content'])
+                    if not answer_elem:
+                        # Try finding next element
+                        answer_elem = question_elem.find_next_sibling()
+
+                    if answer_elem and question_text and '?' in question_text:
+                        answer_text = self._clean_html(answer_elem.get_text())
+                        if len(answer_text) > 10:
+                            faqs.append(FAQ(
+                                question=question_text[:200],
+                                answer=answer_text[:500],
+                                category="FAQ Page"
+                            ))
+
+        return faqs
+
+    def _extract_structured_faqs(self, soup: BeautifulSoup) -> List[FAQ]:
+        """Extract FAQs from structured Q&A format"""
+        faqs = []
+
+        # Look for structured FAQ patterns
+        faq_containers = soup.find_all(['div', 'section'], class_=re.compile(r'faq|qa|question', re.I))
+
+        for container in faq_containers[:3]:
+            # Strategy 1: Find Q: and A: patterns
+            text_content = container.get_text()
+            qa_matches = re.findall(r'Q[:\s]*([^?]+\?)\s*A[:\s]*([^Q]+?)(?=Q:|$)', text_content,
+                                    re.DOTALL | re.IGNORECASE)
+
+            for question, answer in qa_matches[:3]:
+                question_clean = question.strip()
+                answer_clean = self._clean_html(answer.strip())
+
+                if len(question_clean) > 5 and len(answer_clean) > 10:
+                    faqs.append(FAQ(
+                        question=question_clean[:200],
+                        answer=answer_clean[:500],
+                        category="Structured FAQ"
+                    ))
+
+        return faqs
+
+    def _extract_list_faqs(self, soup: BeautifulSoup) -> List[FAQ]:
+        """Extract FAQs from list format"""
+        faqs = []
+
+        # Look for FAQ lists
+        faq_lists = soup.find_all(['ul', 'ol', 'dl'], class_=re.compile(r'faq|question|help', re.I))
+
+        for faq_list in faq_lists[:2]:
+            list_items = faq_list.find_all(['li', 'dt', 'dd'])
+
+            for i in range(0, len(list_items) - 1, 2):  # Process in pairs
+                if i + 1 < len(list_items):
+                    question_item = list_items[i]
+                    answer_item = list_items[i + 1]
+
+                    question_text = question_item.get_text().strip()
+                    answer_text = self._clean_html(answer_item.get_text())
+
+                    if '?' in question_text and len(answer_text) > 10:
+                        faqs.append(FAQ(
+                            question=question_text[:200],
+                            answer=answer_text[:500],
+                            category="List FAQ"
+                        ))
+
+        return faqs
+
+    def _extract_toggle_faqs(self, soup: BeautifulSoup) -> List[FAQ]:
+        """Extract FAQs from toggle/expandable sections"""
+        faqs = []
+
+        # Look for expandable sections
+        toggle_selectors = [
+            '[data-toggle="collapse"]',
+            '.toggle-question',
+            '.expandable',
+            '[onclick*="toggle"]',
+            '.faq-toggle'
+        ]
+
+        for selector in toggle_selectors:
+            toggles = soup.select(selector)
+
+            for toggle in toggles[:5]:
+                question_text = toggle.get_text().strip()
+
+                # Find associated content
+                target_id = toggle.get('data-target') or toggle.get('aria-controls')
+                answer_elem = None
+
+                if target_id:
+                    target_id = target_id.lstrip('#')
+                    answer_elem = soup.find(id=target_id)
+                else:
+                    answer_elem = toggle.find_next_sibling()
+
+                if answer_elem and '?' in question_text:
+                    answer_text = self._clean_html(answer_elem.get_text())
+                    if len(answer_text) > 10:
+                        faqs.append(FAQ(
+                            question=question_text[:200],
+                            answer=answer_text[:500],
+                            category="Toggle FAQ"
+                        ))
+
+        return faqs
+
+    def _remove_duplicate_faqs(self, faqs: List[FAQ]) -> List[FAQ]:
+        """Remove duplicate FAQs based on question similarity"""
+        unique_faqs = []
+        seen_questions = set()
+
+        for faq in faqs:
+            # Normalize question for comparison
+            normalized_question = re.sub(r'[^\w\s]', '', faq.question.lower()).strip()
+
+            if normalized_question not in seen_questions and len(normalized_question) > 5:
+                seen_questions.add(normalized_question)
+                unique_faqs.append(faq)
+
+        return unique_faqs
 
     def extract_brand_context(self, soup: BeautifulSoup, base_url: str) -> str:
         """Extract brand context/about information"""
